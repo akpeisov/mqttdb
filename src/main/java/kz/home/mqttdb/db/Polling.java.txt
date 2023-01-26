@@ -1,0 +1,189 @@
+package kz.home.mqttdb.db;
+
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Map;
+
+import javax.annotation.PostConstruct;
+
+import kz.home.mqttdb.config.Mqtt;
+import kz.home.mqttdb.exceptions.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.MqttPersistenceException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+@Component
+public class Polling {
+    private static final Logger logger = LoggerFactory.getLogger(Polling.class);
+    private static final DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private Connection connection;
+    private boolean initialized = false;
+    private int id;
+
+    // @Autowired
+    // private JdbcTemplate jdbcTemplate;
+
+    @Value("${polling}")
+    private boolean polling;
+
+    private final JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    public Polling(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    // @Scheduled(fixedDelayString = "${pollingTime}")
+    // public void polling() {
+    //     // logger.info("Test", dateTimeFormatter.format(LocalDateTime.now()));
+    //     processPolling();
+    // }
+
+    private boolean prepareConnection() {
+        try {
+            this.connection = DriverManager.getConnection(
+                "jdbc:oracle:thin:@tower:1521/HOMEPDB", "mqtt", "mqttPass");
+            return true;    
+        } catch (SQLException ee) {
+            // dbservice.setErrorText("sqlState " + ee.getSQLState() + ". sqlMessage " + ee.getMessage());
+            // dbservice.setErrorCode(ee.getErrorCode());
+            ee.printStackTrace();
+            // connection.close();
+            return false;
+        } finally {            
+        }
+    }
+
+    private void processPolling() {
+        // Connection connection = null;   
+        if (!polling)     
+            return;
+
+        if (!initialized) {
+            initialized = prepareConnection();
+        }
+        if (!initialized) {
+            return;
+        }
+
+        try {
+            // Connection connection = DriverManager.getConnection(
+            //     "jdbc:oracle:thin:@tower:1521:homepdb", "mqtt", "mqttPass");
+            //connection = jdbcTemplate.getDataSource().getConnection();
+            CallableStatement callableStatement = connection.prepareCall("{call mqtt.services_pkg.getqueue(?, ?, ?, ?)}");
+            callableStatement.registerOutParameter(1, Types.NUMERIC);
+            callableStatement.registerOutParameter(2, Types.VARCHAR);
+            callableStatement.registerOutParameter(3, Types.VARCHAR);
+            callableStatement.registerOutParameter(4, Types.NUMERIC);
+            
+            // ???? ???? ??? ???????????? ?? ????? ??? ??????????? ????? ?? ????????
+            while (true) {
+                callableStatement.execute();  
+                id = callableStatement.getInt(1);
+                String message = callableStatement.getString(2);
+                String topic = callableStatement.getString(3);
+                int qos = callableStatement.getInt(4);
+                if (id > 0) {
+                    // something exists                
+                    System.out.println(topic + " " + message);
+                    publish(message, topic, qos, false);                 
+                    setPollingResult(id, "OK");
+                } else {
+                    break;
+                }          
+            }
+            callableStatement.close();
+            // connection.close();
+        } catch (SQLException ee) {
+            // dbservice.setErrorText("sqlState " + ee.getSQLState() + ". sqlMessage " + ee.getMessage());
+            // dbservice.setErrorCode(ee.getErrorCode());
+            ee.printStackTrace();
+            // connection.close();
+        } catch (MqttPersistenceException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+            setPollingResult(id, e.getLocalizedMessage());
+        } catch (org.eclipse.paho.client.mqttv3.MqttException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+            setPollingResult(id, e.getLocalizedMessage());
+        } finally {
+            
+        }
+    }
+
+    void setPollingResult(int id, String message) {
+        try {
+            CallableStatement callableStatement = connection.prepareCall("{call mqtt.services_pkg.setQueueResult(?, ?)}");
+            callableStatement.setInt(1, id);
+            callableStatement.setString(2, message);
+            callableStatement.execute();                          
+            callableStatement.close();            
+        } catch (SQLException ee) {
+            ee.printStackTrace();            
+        }
+    }
+
+    void publish(String message, String topic, int qos, boolean retained) throws MqttPersistenceException, org.eclipse.paho.client.mqttv3.MqttException {
+        MqttMessage mqttMessage = new MqttMessage(message.getBytes());
+        mqttMessage.setQos(qos);
+        mqttMessage.setRetained(retained);
+        Mqtt.getInstance().publish(topic, mqttMessage);
+    }
+
+    void setMessage(String topic, String message) {
+        try {
+            CallableStatement callableStatement = connection.prepareCall("{call mqtt.services_pkg.setMessage(?, ?)}");
+            callableStatement.setString(1, topic);
+            callableStatement.setString(2, message);
+            callableStatement.execute();                          
+            callableStatement.close();            
+        } catch (SQLException ee) {
+            ee.printStackTrace();            
+        }
+    }
+
+    //@Scheduled(fixedDelayString = "5000")
+    @PostConstruct
+    void subscribe() throws org.eclipse.paho.client.mqttv3.MqttException {
+        logger.info("subscribe");
+        String sql = "SELECT topic from mqtt.mqtt_subscribe";
+        // List<Customer> customers = new ArrayList<>();
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+
+        for (Map row : rows) {
+            System.out.println(row.get("topic"));
+            // Customer obj = new Customer();
+
+            // obj.setID(((Integer) row.get("ID")).longValue());
+            // obj.setName((String) row.get("NAME"));
+			// // Spring returns BigDecimal, need convert
+            // obj.setAge(((BigDecimal) row.get("AGE")).intValue()); 
+            // obj.setCreatedDate(((Timestamp) row.get("CREATED_DATE")).toLocalDateTime());
+            //customers.add(obj);
+        }
+
+
+
+        System.out.println("subscribe");
+        String topic = "topicDB";
+        Mqtt.getInstance().subscribeWithResponse(topic, (s, mqttMessage) -> {
+            setMessage(s, new String(mqttMessage.getPayload()));
+            // System.out.println(s);// + mqttMessage.getPayload().toString());
+            // System.out.println(new String(mqttMessage.getPayload()));            
+        });
+        System.out.println("subscribe2");
+    }
+}
